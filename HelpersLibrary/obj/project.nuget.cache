@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "dgSpecHash": "mm21bTTqPzE=",
+  "success": true,
+  "projectFilePath": "C:\\Users\\renfr\\OneDrive\\Desktop\\Programare\\C#\\ShareScreen.NET9\\HelpersLibrary\\HelpersLibrary.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\renfr\\.nuget\\packages\\inputsimulatorcore\\1.0.5\\inputsimulatorcore.1.0.5.nupkg.sha512",
+    "C:\\Users\\renfr\\.nuget\\packages\\microsoft.win32.systemevents\\9.0.0\\microsoft.win32.systemevents.9.0.0.nupkg.sha512",
+    "C:\\Users\\renfr\\.nuget\\packages\\system.codedom\\9.0.0\\system.codedom.9.0.0.nupkg.sha512",
+    "C:\\Users\\renfr\\.nuget\\packages\\system.drawing.common\\9.0.0\\system.drawing.common.9.0.0.nupkg.sha512",
+    "C:\\Users\\renfr\\.nuget\\packages\\system.management\\9.0.0\\system.management.9.0.0.nupkg.sha512"
+  ],
+  "logs": []
+}

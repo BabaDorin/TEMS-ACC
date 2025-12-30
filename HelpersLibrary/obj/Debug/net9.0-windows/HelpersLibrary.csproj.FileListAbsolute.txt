@@ -1,0 +1,12 @@
+C:\Users\renfr\OneDrive\Desktop\Programare\C#\ShareScreen.NET9\HelpersLibrary\obj\Debug\net9.0-windows\HelpersLibrary.csproj.AssemblyReference.cache
+C:\Users\renfr\OneDrive\Desktop\Programare\C#\ShareScreen.NET9\HelpersLibrary\obj\Debug\net9.0-windows\HelpersLibrary.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\renfr\OneDrive\Desktop\Programare\C#\ShareScreen.NET9\HelpersLibrary\obj\Debug\net9.0-windows\HelpersLibrary.AssemblyInfoInputs.cache
+C:\Users\renfr\OneDrive\Desktop\Programare\C#\ShareScreen.NET9\HelpersLibrary\obj\Debug\net9.0-windows\HelpersLibrary.AssemblyInfo.cs
+C:\Users\renfr\OneDrive\Desktop\Programare\C#\ShareScreen.NET9\HelpersLibrary\obj\Debug\net9.0-windows\HelpersLibrary.csproj.CoreCompileInputs.cache
+C:\Users\renfr\OneDrive\Desktop\Programare\C#\ShareScreen.NET9\HelpersLibrary\bin\Debug\net9.0-windows\HelpersLibrary.deps.json
+C:\Users\renfr\OneDrive\Desktop\Programare\C#\ShareScreen.NET9\HelpersLibrary\bin\Debug\net9.0-windows\HelpersLibrary.dll
+C:\Users\renfr\OneDrive\Desktop\Programare\C#\ShareScreen.NET9\HelpersLibrary\bin\Debug\net9.0-windows\HelpersLibrary.pdb
+C:\Users\renfr\OneDrive\Desktop\Programare\C#\ShareScreen.NET9\HelpersLibrary\obj\Debug\net9.0-windows\HelpersLibrary.dll
+C:\Users\renfr\OneDrive\Desktop\Programare\C#\ShareScreen.NET9\HelpersLibrary\obj\Debug\net9.0-windows\refint\HelpersLibrary.dll
+C:\Users\renfr\OneDrive\Desktop\Programare\C#\ShareScreen.NET9\HelpersLibrary\obj\Debug\net9.0-windows\HelpersLibrary.pdb
+C:\Users\renfr\OneDrive\Desktop\Programare\C#\ShareScreen.NET9\HelpersLibrary\obj\Debug\net9.0-windows\ref\HelpersLibrary.dll

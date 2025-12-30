@@ -1,0 +1,12 @@
+C:\Users\renfr\OneDrive\Desktop\Programare\C#\ShareScreen.NET9\CommunicationLibrary\bin\Debug\net9.0\CommunicationLibrary.deps.json
+C:\Users\renfr\OneDrive\Desktop\Programare\C#\ShareScreen.NET9\CommunicationLibrary\bin\Debug\net9.0\CommunicationLibrary.dll
+C:\Users\renfr\OneDrive\Desktop\Programare\C#\ShareScreen.NET9\CommunicationLibrary\bin\Debug\net9.0\CommunicationLibrary.pdb
+C:\Users\renfr\OneDrive\Desktop\Programare\C#\ShareScreen.NET9\CommunicationLibrary\obj\Debug\net9.0\CommunicationLibrary.csproj.AssemblyReference.cache
+C:\Users\renfr\OneDrive\Desktop\Programare\C#\ShareScreen.NET9\CommunicationLibrary\obj\Debug\net9.0\CommunicationLibrary.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\renfr\OneDrive\Desktop\Programare\C#\ShareScreen.NET9\CommunicationLibrary\obj\Debug\net9.0\CommunicationLibrary.AssemblyInfoInputs.cache
+C:\Users\renfr\OneDrive\Desktop\Programare\C#\ShareScreen.NET9\CommunicationLibrary\obj\Debug\net9.0\CommunicationLibrary.AssemblyInfo.cs
+C:\Users\renfr\OneDrive\Desktop\Programare\C#\ShareScreen.NET9\CommunicationLibrary\obj\Debug\net9.0\CommunicationLibrary.csproj.CoreCompileInputs.cache
+C:\Users\renfr\OneDrive\Desktop\Programare\C#\ShareScreen.NET9\CommunicationLibrary\obj\Debug\net9.0\CommunicationLibrary.dll
+C:\Users\renfr\OneDrive\Desktop\Programare\C#\ShareScreen.NET9\CommunicationLibrary\obj\Debug\net9.0\refint\CommunicationLibrary.dll
+C:\Users\renfr\OneDrive\Desktop\Programare\C#\ShareScreen.NET9\CommunicationLibrary\obj\Debug\net9.0\CommunicationLibrary.pdb
+C:\Users\renfr\OneDrive\Desktop\Programare\C#\ShareScreen.NET9\CommunicationLibrary\obj\Debug\net9.0\ref\CommunicationLibrary.dll
