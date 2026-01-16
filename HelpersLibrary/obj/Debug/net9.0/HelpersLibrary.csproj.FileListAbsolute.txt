@@ -1,4 +1,0 @@
-C:\Users\renfr\OneDrive\Desktop\Programare\C#\ShareScreen.NET9\HelpersLibrary\obj\Debug\net9.0\HelpersLibrary.GeneratedMSBuildEditorConfig.editorconfig
-C:\Users\renfr\OneDrive\Desktop\Programare\C#\ShareScreen.NET9\HelpersLibrary\obj\Debug\net9.0\HelpersLibrary.AssemblyInfoInputs.cache
-C:\Users\renfr\OneDrive\Desktop\Programare\C#\ShareScreen.NET9\HelpersLibrary\obj\Debug\net9.0\HelpersLibrary.AssemblyInfo.cs
-C:\Users\renfr\OneDrive\Desktop\Programare\C#\ShareScreen.NET9\HelpersLibrary\obj\Debug\net9.0\HelpersLibrary.csproj.CoreCompileInputs.cache
