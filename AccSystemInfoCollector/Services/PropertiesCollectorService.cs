@@ -19,7 +19,6 @@ public sealed class PropertiesCollectorService(
     {
         logger.LogInformation("PropertiesCollectorService started. Interval: {Interval}h", _interval.TotalHours);
 
-        // Collect immediately on startup
         await CollectAndSendAsync(stoppingToken);
 
         using var timer = new PeriodicTimer(_interval);
@@ -29,18 +28,19 @@ public sealed class PropertiesCollectorService(
 
     private async Task CollectAndSendAsync(CancellationToken ct)
     {
-        try
-        {
-            var properties = await collector.CollectSystemPropertiesAsync();
-            var result = await apiClient.SendPropertiesAsync(properties);
+        if (ct.IsCancellationRequested) return;
 
-            if (result.IsFailure)
-                logger.LogWarning("Properties send failed: {Error}", result.Error);
-        }
-        catch (OperationCanceledException) { }
-        catch (Exception ex)
+        var collectResult = await collector.CollectSystemPropertiesAsync();
+
+        if (collectResult.IsFailure)
         {
-            logger.LogError(ex, "Unexpected error in PropertiesCollectorService");
+            logger.LogError("Failed to collect system properties: {Error}", collectResult.Error);
+            return;
         }
+
+        var sendResult = await apiClient.SendPropertiesAsync(collectResult.Value!);
+
+        if (sendResult.IsFailure)
+            logger.LogWarning("Failed to send properties: {Error}", sendResult.Error);
     }
 }

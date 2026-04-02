@@ -1,535 +1,339 @@
 using System.Diagnostics;
 using System.Net.NetworkInformation;
+using System.Runtime.Versioning;
 using System.Text.Json;
 using TEMS.ACC.Models;
+using TEMS.ACC.Helpers;
 
 namespace TEMS.ACC.Collectors.Readers;
 
+[SupportedOSPlatform("windows")]
 public sealed class WindowsPropertiesReader : BasePropertiesReader, ISystemPropertiesReader
 {
-    // Static properties
-    public async Task<string> GetSerialNumberAsync() =>
-        (await ExecuteCommandAsync("powershell", "-Command \"(Get-WmiObject Win32_BIOS).SerialNumber\""))
-        .Trim().NullIfEmpty() ?? "Unknown";
+    // Shortcut for PowerShell commands
+    private Task<string> PS(string cmd, int timeout = 10) =>
+        RunAsync("powershell", $"-Command \"{cmd}\"", timeout);
 
-    public async Task<string> GetUuidAsync() =>
-        (await ExecuteCommandAsync("powershell", "-Command \"(Get-WmiObject Win32_ComputerSystemProduct).UUID\""))
-        .Trim().NullIfEmpty() ?? "Unknown";
+    private Task<string> PSJson(string cmd, int timeout = 10) =>
+        PS($"{cmd} | ConvertTo-Json", timeout);
 
-    public string GetHostname() => GetHostnameBase();
-    public List<string> GetMacAddresses() => GetMacAddressesBase();
+    //Identity
 
-    public async Task<(string Manufacturer, string Model, int Cores, int LogicalProcessors, string Architecture, double MaxGhz, double MinGhz)> GetCpuInfoAsync()
+    public Task<Result<string>> GetSerialNumberAsync() => Result<string>.From(async () =>
+        (await PS("(Get-WmiObject Win32_BIOS).SerialNumber")).NullIfEmpty() ?? "Unknown");
+
+    public Task<Result<string>> GetUuidAsync() => Result<string>.From(async () =>
+        (await PS("(Get-WmiObject Win32_ComputerSystemProduct).UUID")).NullIfEmpty() ?? "Unknown");
+
+    public Result<string> GetHostname() => Result<string>.From(GetHostnameBase);
+    public Result<List<string>> GetMacAddresses() => Result<List<string>>.From(GetMacAddressesBase);
+
+    //CPU
+
+    public Task<Result<(string, string, int, int, string, double, double)>> GetCpuInfoAsync() =>
+    Result<(string, string, int, int, string, double, double)>.From(async () =>
     {
-        var output = await ExecuteCommandAsync("powershell",
-            "-Command \"Get-WmiObject Win32_Processor | Select-Object Manufacturer,Name,NumberOfCores,NumberOfLogicalProcessors,AddressWidth,MaxClockSpeed | ConvertTo-Json\"");
-        try
+        var json = await PSJson("Get-WmiObject Win32_Processor | Select-Object Manufacturer,Name,NumberOfCores,NumberOfLogicalProcessors,AddressWidth,MaxClockSpeed");
+        var el = JsonArray(json).First();
+        var cores = JsonInt(el, "NumberOfCores");
+        var logical = JsonInt(el, "NumberOfLogicalProcessors");
+        var mhz = (double)JsonInt(el, "MaxClockSpeed");
+        var arch = JsonInt(el, "AddressWidth") == 64 ? "x86_64" : "x86";
+        return (JsonStr(el, "Manufacturer"), JsonStr(el, "Name"), cores, logical, arch, Math.Round(mhz / 1000.0, 2), 0);
+    });
+
+    //RAM
+
+    public Task<Result<double>> GetRamTotalGbAsync() => Result<double>.From(async () =>
+    {
+        var raw = await PS("(Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory");
+        return long.TryParse(raw, out var bytes) ? BytesToGb(bytes) : 0;
+    });
+
+    public Task<Result<List<RamSlot>>> GetRamSlotsAsync() => Result<List<RamSlot>>.From(async () =>
+    {
+        var json = await PSJson("Get-WmiObject Win32_PhysicalMemory | Select-Object DeviceLocator,Capacity,SMBIOSMemoryType,Speed,Manufacturer,PartNumber");
+        return JsonArray(json).Select(el =>
         {
-            using var doc = JsonDocument.Parse(output);
-            var root = doc.RootElement.ValueKind == JsonValueKind.Array ? doc.RootElement[0] : doc.RootElement;
-
-            var manufacturer = root.GetProperty("Manufacturer").GetString() ?? "Unknown";
-            var name         = root.GetProperty("Name").GetString() ?? "Unknown";
-            int.TryParse(root.GetProperty("NumberOfCores").ToString(), out var cores);
-            int.TryParse(root.GetProperty("NumberOfLogicalProcessors").ToString(), out var logical);
-            var width = root.GetProperty("AddressWidth").ToString();
-            var arch  = width == "64" ? "x86_64" : "x86";
-            double.TryParse(root.GetProperty("MaxClockSpeed").ToString(), out var mhz);
-
-            return (manufacturer, name, cores, logical, arch, Math.Round(mhz / 1000.0, 2), 0);
-        }
-        catch { return ("Unknown", "Unknown", 0, 0, "Unknown", 0, 0); }
-    }
-
-    public async Task<double> GetRamTotalGbAsync()
-    {
-        var output = await ExecuteCommandAsync("powershell",
-            "-Command \"(Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory\"");
-        if (long.TryParse(output.Trim(), out var bytes))
-            return Math.Round((double)bytes / 1024 / 1024 / 1024, 2);
-        return 0;
-    }
-
-    public async Task<List<RamSlot>> GetRamSlotsAsync()
-    {
-        var slots = new List<RamSlot>();
-        var output = await ExecuteCommandAsync("powershell",
-            "-Command \"Get-WmiObject Win32_PhysicalMemory | Select-Object DeviceLocator,Capacity,MemoryType,SMBIOSMemoryType,Speed,Manufacturer,PartNumber | ConvertTo-Json\"");
-        try
-        {
-            using var doc = JsonDocument.Parse(output);
-            var arr = doc.RootElement.ValueKind == JsonValueKind.Array
-                ? doc.RootElement.EnumerateArray()
-                : Enumerable.Repeat(doc.RootElement, 1).AsEnumerable().GetEnumerator() is var _ ? doc.RootElement.EnumerateArray() : doc.RootElement.EnumerateArray();
-
-            foreach (var item in doc.RootElement.ValueKind == JsonValueKind.Array
-                ? doc.RootElement.EnumerateArray()
-                : Enumerable.Repeat(doc.RootElement, 1))
+            int.TryParse(JsonStr(el, "SMBIOSMemoryType"), out var memType);
+            int.TryParse(JsonStr(el, "Speed"), out var speed);
+            return new RamSlot
             {
-                var capacity = item.GetProperty("Capacity").GetInt64();
-                int.TryParse(item.GetProperty("Speed").ToString(), out var speed);
-
-                // SMBIOSMemoryType: 26=DDR4, 34=DDR5
-                int.TryParse(item.GetProperty("SMBIOSMemoryType").ToString(), out var memType);
-                var type = memType switch { 26 => "DDR4", 34 => "DDR5", 24 => "DDR3", _ => "Unknown" };
-
-                slots.Add(new RamSlot
-                {
-                    Locator      = item.GetProperty("DeviceLocator").GetString() ?? "Unknown",
-                    SizeGb       = Math.Round((double)capacity / 1024 / 1024 / 1024, 0),
-                    Type         = type,
-                    SpeedMhz     = speed,
-                    Manufacturer = item.GetProperty("Manufacturer").GetString()?.Trim() ?? "Unknown",
-                    PartNumber   = item.GetProperty("PartNumber").GetString()?.Trim() ?? "Unknown"
-                });
-            }
-        }
-        catch { }
-        return slots;
-    }
-
-    public async Task<(int Total, int Used)> GetRamSlotCountAsync()
-    {
-        var totalOutput = await ExecuteCommandAsync("powershell",
-            "-Command \"(Get-WmiObject Win32_PhysicalMemoryArray).MemoryDevices\"");
-        var usedOutput = await ExecuteCommandAsync("powershell",
-            "-Command \"(Get-WmiObject Win32_PhysicalMemory).Count\"");
-        int.TryParse(totalOutput.Trim(), out var total);
-        int.TryParse(usedOutput.Trim(), out var used);
-        return (total, used);
-    }
-
-    public async Task<List<StorageDrive>> GetStorageDrivesAsync()
-    {
-        var drives = new List<StorageDrive>();
-        var output = await ExecuteCommandAsync("powershell",
-            "-Command \"Get-PhysicalDisk | Select-Object FriendlyName,Size,MediaType | ConvertTo-Json\"");
-        try
-        {
-            using var doc = JsonDocument.Parse(output);
-            foreach (var item in doc.RootElement.ValueKind == JsonValueKind.Array
-                ? doc.RootElement.EnumerateArray()
-                : Enumerable.Repeat(doc.RootElement, 1))
-            {
-                drives.Add(new StorageDrive
-                {
-                    Model  = item.GetProperty("FriendlyName").GetString() ?? "Unknown",
-                    SizeGb = Math.Round((double)item.GetProperty("Size").GetInt64() / 1024 / 1024 / 1024, 2),
-                    Type   = item.GetProperty("MediaType").GetString() ?? "Unknown"
-                });
-            }
-        }
-        catch { }
-        return drives;
-    }
-
-    public async Task<List<GpuInfo>> GetGpusAsync()
-    {
-        var gpus = new List<GpuInfo>();
-        var output = await ExecuteCommandAsync("powershell",
-            "-Command \"Get-WmiObject Win32_VideoController | Select-Object Name,AdapterRAM | ConvertTo-Json\"");
-        try
-        {
-            using var doc = JsonDocument.Parse(output);
-            foreach (var item in doc.RootElement.ValueKind == JsonValueKind.Array
-                ? doc.RootElement.EnumerateArray()
-                : Enumerable.Repeat(doc.RootElement, 1))
-            {
-                gpus.Add(new GpuInfo
-                {
-                    Model  = item.GetProperty("Name").GetString() ?? "Unknown",
-                    VramMb = item.GetProperty("AdapterRAM").GetInt64() / 1024 / 1024
-                });
-            }
-        }
-        catch { }
-        return gpus;
-    }
-
-    public async Task<List<NetworkAdapterInfo>> GetNetworkAdaptersAsync()
-    {
-        var adapters = new List<NetworkAdapterInfo>();
-
-        foreach (var iface in NetworkInterface.GetAllNetworkInterfaces())
-        {
-            var mac = string.Join(":", iface.GetPhysicalAddress().GetAddressBytes().Select(b => b.ToString("X2")));
-            var ips = iface.GetIPProperties().UnicastAddresses.Select(a => a.Address.ToString()).ToList();
-            var type = iface.NetworkInterfaceType switch
-            {
-                NetworkInterfaceType.Ethernet      => "Ethernet",
-                NetworkInterfaceType.Wireless80211 => "WiFi",
-                NetworkInterfaceType.Loopback      => "Loopback",
-                _ => iface.NetworkInterfaceType.ToString()
+                Locator = JsonStr(el, "DeviceLocator"),
+                SizeGb = Math.Round((double)JsonLong(el, "Capacity") / 1024 / 1024 / 1024, 0),
+                Type = memType switch { 26 => "DDR4", 34 => "DDR5", 24 => "DDR3", _ => "Unknown" },
+                SpeedMhz = speed,
+                Manufacturer = JsonStr(el, "Manufacturer").Trim(),
+                PartNumber = JsonStr(el, "PartNumber").Trim()
             };
+        }).ToList();
+    });
 
-            adapters.Add(new NetworkAdapterInfo
-            {
-                Name        = iface.Name,
-                MacAddress  = mac,
-                IpAddresses = ips,
-                Type        = type,
-                SpeedMbps   = iface.Speed > 0 ? iface.Speed / 1_000_000 : 0,
-                Driver      = "Unknown",
-                IsUp        = iface.OperationalStatus == OperationalStatus.Up
-            });
-        }
-
-        return adapters;
-    }
-
-    public async Task<(string Name, string Version, DateTime LastBoot, string LastUser)> GetOsInfoAsync()
+    public Task<Result<(int, int)>> GetRamSlotCountAsync() => Result<(int, int)>.From(async () =>
     {
-        var output = await ExecuteCommandAsync("powershell",
-            "-Command \"Get-WmiObject Win32_OperatingSystem | Select-Object Caption,Version,LastBootUpTime | ConvertTo-Json\"");
-        try
+        var total = await PS("(Get-WmiObject Win32_PhysicalMemoryArray).MemoryDevices");
+        var used = await PS("(Get-WmiObject Win32_PhysicalMemory).Count");
+        int.TryParse(total, out var t); int.TryParse(used, out var u);
+        return (t, u);
+    });
+
+    //Storage
+
+    public Task<Result<List<StorageDrive>>> GetStorageDrivesAsync() => Result<List<StorageDrive>>.From(async () =>
+    {
+        var json = await PSJson("Get-PhysicalDisk | Select-Object FriendlyName,Size,MediaType");
+        return JsonArray(json).Select(el => new StorageDrive
         {
-            using var doc = JsonDocument.Parse(output);
-            var name     = doc.RootElement.GetProperty("Caption").GetString() ?? "Windows";
-            var version  = doc.RootElement.GetProperty("Version").GetString() ?? "Unknown";
-            var bootStr  = doc.RootElement.GetProperty("LastBootUpTime").GetString() ?? "";
-            var lastBoot = DateTime.TryParse(bootStr, out var b) ? b : DateTime.UtcNow;
+            Model = JsonStr(el, "FriendlyName"),
+            SizeGb = BytesToGb(JsonLong(el, "Size")),
+            Type = JsonStr(el, "MediaType")
+        }).ToList();
+    });
 
-            var lastUserOutput = await ExecuteCommandAsync("powershell",
-                "-Command \"(Get-WmiObject Win32_ComputerSystem).UserName\"");
-            var lastUser = lastUserOutput.Trim().Split('\\').Last().NullIfEmpty() ?? "Unknown";
+    //GPU
 
-            return (name, version, lastBoot, lastUser);
-        }
-        catch { return ("Windows", "Unknown", DateTime.UtcNow, "Unknown"); }
-    }
+    public Task<Result<List<GpuInfo>>> GetGpusAsync() => Result<List<GpuInfo>>.From(async () =>
+    {
+        // nvidia-smi
+        var nv = await RunAsync("nvidia-smi", "--query-gpu=name,memory.total --format=csv,noheader");
+        if (!string.IsNullOrWhiteSpace(nv))
+            return nv.Split('\n').Where(l => !string.IsNullOrWhiteSpace(l)).Select(line =>
+            {
+                var p = line.Split(',');
+                return new GpuInfo { Model = p[0].Trim(), VramMb = long.TryParse(RegexMatch(p.Length > 1 ? p[1] : "", @"\d+"), out var v) ? v : 0 };
+            }).ToList();
 
-    public async Task<(string Shell, string DisplayServer, string DesktopEnv, string Locale, int PackageCount)> GetSoftwareInfoAsync()
+        // Fallback: WMI (not accurate for > 4GB, but better than nothing)
+        var json = await PSJson("Get-WmiObject Win32_VideoController | Select-Object Name,AdapterRAM,AdapterDACType");
+        return JsonArray(json).Select(el => new GpuInfo
+        {
+            Model = JsonStr(el, "Name"),
+            VramMb = JsonLong(el, "AdapterRAM") / 1024 / 1024
+        }).ToList();
+    });
+
+    //Network
+
+    public Task<Result<List<NetworkAdapterInfo>>> GetNetworkAdaptersAsync() =>
+    Result<List<NetworkAdapterInfo>>.From(() => Task.FromResult(
+        NetworkInterface.GetAllNetworkInterfaces()
+            .Where(iface =>
+                !iface.Name.Contains("WFP", StringComparison.OrdinalIgnoreCase) &&
+                !iface.Name.Contains("QoS", StringComparison.OrdinalIgnoreCase) &&
+                !iface.Name.Contains("Filter", StringComparison.OrdinalIgnoreCase) &&
+                !iface.Name.Contains("Pseudo", StringComparison.OrdinalIgnoreCase) &&
+                !iface.Name.Contains("Miniport", StringComparison.OrdinalIgnoreCase) &&
+                iface.NetworkInterfaceType != NetworkInterfaceType.Loopback)
+            .Select(iface => new NetworkAdapterInfo
+            {
+                Name = iface.Name,
+                MacAddress = string.Join(":", iface.GetPhysicalAddress().GetAddressBytes().Select(b => b.ToString("X2"))),
+                IpAddresses = iface.GetIPProperties().UnicastAddresses
+                                   .Where(a => a.Address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork) // только IPv4
+                                   .Select(a => a.Address.ToString()).ToList(),
+                Type = iface.NetworkInterfaceType switch
+                {
+                    NetworkInterfaceType.Ethernet => "Ethernet",
+                    NetworkInterfaceType.Wireless80211 => "WiFi",
+                    NetworkInterfaceType.Tunnel => "Tunnel",
+                    _ => iface.NetworkInterfaceType.ToString()
+                },
+                SpeedMbps = iface.Speed > 0 ? iface.Speed / 1_000_000 : 0,
+                Driver = "Unknown",
+                IsUp = iface.OperationalStatus == OperationalStatus.Up
+            }).ToList()));
+
+    //OS
+
+    public Task<Result<(string, string, DateTime, string)>> GetOsInfoAsync() => Result<(string, string, DateTime, string)>.From(async () =>
+    {
+        var json = await PSJson("Get-WmiObject Win32_OperatingSystem | Select-Object Caption,Version,LastBootUpTime");
+        var el = JsonArray(json).First();
+        var lastBoot = DateTime.TryParse(JsonStr(el, "LastBootUpTime"), out var b) ? b : DateTime.UtcNow;
+        var user = (await PS("(Get-WmiObject Win32_ComputerSystem).UserName")).Split('\\').Last().NullIfEmpty() ?? "Unknown";
+        return (JsonStr(el, "Caption"), JsonStr(el, "Version"), lastBoot, user);
+    });
+
+    public Task<Result<(string, string, string, string, int)>> GetSoftwareInfoAsync() => Result<(string, string, string, string, int)>.From(async () =>
     {
         var locale = System.Globalization.CultureInfo.CurrentCulture.Name;
-
-        // Winget installed packages count
-        int packages = 0;
-        var winget = await ExecuteCommandAsync("powershell",
-            "-Command \"winget list 2>$null | Measure-Object -Line | Select-Object -ExpandProperty Lines\"");
-        int.TryParse(winget.Trim(), out packages);
-
+        var winget = await PS("winget list --disable-interactivity 2>$null | Measure-Object -Line | Select-Object -ExpandProperty Lines", timeout: 20);
+        
+        int.TryParse(winget.Trim(), out var total);
+        var packages = Math.Max(0, total - 2);
         return ("PowerShell", "Win32", "Windows Shell", locale, packages);
-    }
+    });
 
-    public async Task<(string Manufacturer, string Model, string BiosVersion, string Motherboard)> GetSystemInfoAsync()
+    //System
+
+    public Task<Result<(string, string, string, string)>> GetSystemInfoAsync() => Result<(string, string, string, string)>.From(async () =>
     {
-        string manufacturer = "Unknown", model = "Unknown", biosVer = "Unknown", motherboard = "Unknown";
+        var cs = JsonArray(await PSJson("Get-WmiObject Win32_ComputerSystem | Select-Object Manufacturer,Model")).First();
+        var bios = JsonArray(await PSJson("Get-WmiObject Win32_BIOS | Select-Object SMBIOSBIOSVersion")).First();
+        var board = JsonArray(await PSJson("Get-WmiObject Win32_BaseBoard | Select-Object Manufacturer,Product")).First();
+        return (JsonStr(cs, "Manufacturer"), JsonStr(cs, "Model"), JsonStr(bios, "SMBIOSBIOSVersion"),
+                $"{JsonStr(board, "Manufacturer")} {JsonStr(board, "Product")}".Trim());
+    });
 
-        try
-        {
-            var cs = await ExecuteCommandAsync("powershell",
-                "-Command \"Get-WmiObject Win32_ComputerSystem | Select-Object Manufacturer,Model | ConvertTo-Json\"");
-            using var d1 = JsonDocument.Parse(cs);
-            manufacturer = d1.RootElement.GetProperty("Manufacturer").GetString() ?? "Unknown";
-            model        = d1.RootElement.GetProperty("Model").GetString() ?? "Unknown";
-        }
-        catch { }
+    //Displays
 
-        try
-        {
-            var bios = await ExecuteCommandAsync("powershell",
-                "-Command \"Get-WmiObject Win32_BIOS | Select-Object SMBIOSBIOSVersion | ConvertTo-Json\"");
-            using var d2 = JsonDocument.Parse(bios);
-            biosVer = d2.RootElement.GetProperty("SMBIOSBIOSVersion").GetString() ?? "Unknown";
-        }
-        catch { }
-
-        try
-        {
-            var board = await ExecuteCommandAsync("powershell",
-                "-Command \"Get-WmiObject Win32_BaseBoard | Select-Object Manufacturer,Product | ConvertTo-Json\"");
-            using var d3 = JsonDocument.Parse(board);
-            motherboard = $"{d3.RootElement.GetProperty("Manufacturer").GetString()} {d3.RootElement.GetProperty("Product").GetString()}".Trim();
-        }
-        catch { }
-
-        return (manufacturer, model, biosVer, motherboard);
-    }
-
-    public async Task<List<DisplayInfo>> GetDisplaysAsync()
+    public Task<Result<List<DisplayInfo>>> GetDisplaysAsync() => Result<List<DisplayInfo>>.From(async () =>
     {
-        var displays = new List<DisplayInfo>();
-        var output = await ExecuteCommandAsync("powershell",
-            "-Command \"Get-WmiObject Win32_VideoController | Select-Object CurrentHorizontalResolution,CurrentVerticalResolution | ConvertTo-Json\"");
-        try
+        var json = await PSJson("Get-WmiObject Win32_VideoController | Select-Object CurrentHorizontalResolution,CurrentVerticalResolution");
+        var first = true;
+        return JsonArray(json).Select(el =>
         {
-            using var doc = JsonDocument.Parse(output);
-            var first = true;
-            foreach (var item in doc.RootElement.ValueKind == JsonValueKind.Array
-                ? doc.RootElement.EnumerateArray()
-                : Enumerable.Repeat(doc.RootElement, 1))
-            {
-                var h = item.GetProperty("CurrentHorizontalResolution").GetInt32();
-                var v = item.GetProperty("CurrentVerticalResolution").GetInt32();
-                displays.Add(new DisplayInfo { Resolution = $"{h}x{v}", IsPrimary = first });
-                first = false;
-            }
-        }
-        catch { }
-        return displays;
-    }
+            var d = new DisplayInfo { Resolution = $"{JsonInt(el, "CurrentHorizontalResolution")}x{JsonInt(el, "CurrentVerticalResolution")}", IsPrimary = first };
+            first = false;
+            return d;
+        }).ToList();
+    });
 
-    public async Task<SecurityInfo> GetSecurityInfoAsync()
+    //Security
+
+    public Task<Result<SecurityInfo>> GetSecurityInfoAsync() => Result<SecurityInfo>.From(async () =>
     {
-        var security = new SecurityInfo();
+        var s = new SecurityInfo();
 
-        // Secure Boot
-        var sbOutput = await ExecuteCommandAsync("powershell",
-            "-Command \"Confirm-SecureBootUEFI 2>$null\"");
-        security.SecureBootEnabled = sbOutput.Trim().ToLower() == "true";
+        s.SecureBootEnabled = (await PS("Confirm-SecureBootUEFI 2>$null", timeout: 5)).Trim().ToLower() == "true";
 
-        // TPM
-        var tpmOutput = await ExecuteCommandAsync("powershell",
-            "-Command \"Get-WmiObject -Namespace 'root/cimv2/security/microsofttpm' -Class Win32_Tpm | Select-Object SpecVersion | ConvertTo-Json\"");
-        try
+        var tpmJson = await PS("Get-WmiObject -Namespace 'root/cimv2/security/microsofttpm' -Class Win32_Tpm | Select-Object SpecVersion | ConvertTo-Json 2>$null", timeout: 5);
+        if (!string.IsNullOrWhiteSpace(tpmJson))
         {
-            using var doc = JsonDocument.Parse(tpmOutput);
-            var spec = doc.RootElement.GetProperty("SpecVersion").GetString() ?? "";
-            security.TpmVersion = spec.StartsWith("2") ? "2.0" : spec.StartsWith("1") ? "1.2" : "Unknown";
+            var spec = JsonStr(JsonArray(tpmJson).First(), "SpecVersion");
+            s.TpmVersion = spec.StartsWith("2") ? "2.0" : spec.StartsWith("1") ? "1.2" : "None";
         }
-        catch { security.TpmVersion = "None"; }
 
-        // BitLocker (disk encryption)
-        var blOutput = await ExecuteCommandAsync("powershell",
-            "-Command \"Get-BitLockerVolume -MountPoint C: 2>$null | Select-Object -ExpandProperty ProtectionStatus\"");
-        security.DiskEncryptionEnabled = blOutput.Trim() == "On";
+        s.DiskEncryptionEnabled = (await PS("(Get-BitLockerVolume -MountPoint C: 2>$null).ProtectionStatus", timeout: 10)).Trim() == "On";
+        s.FirewallActive = int.TryParse((await PS("(Get-NetFirewallProfile | Where-Object { $_.Enabled -eq 'True' }).Count", timeout: 5)), out var fw) && fw > 0;
+        s.AppArmorStatus = "N/A (Windows Defender)";
 
-        // Firewall
-        var fwOutput = await ExecuteCommandAsync("powershell",
-            "-Command \"(Get-NetFirewallProfile | Where-Object Enabled -eq 'True').Count\"");
-        security.FirewallActive = int.TryParse(fwOutput.Trim(), out var fwCount) && fwCount > 0;
+        var failed = await PS("(Get-WinEvent -FilterHashtable @{LogName='Security';Id=4625;StartTime=(Get-Date).AddHours(-24)} -ErrorAction SilentlyContinue | Measure-Object).Count", timeout: 10);
+        int.TryParse(failed, out var failedCount);
+        s.FailedLoginAttempts = failedCount;
 
-        security.AppArmorStatus = "N/A (Windows Defender)";
+        s.OpenPorts = (await PS("Get-NetTCPConnection -State Listen | Select-Object -ExpandProperty LocalPort | Sort-Object -Unique", timeout: 5))
+            .Split('\n').Where(l => !string.IsNullOrWhiteSpace(l)).Select(l => l.Trim()).Distinct().OrderBy(p => p).ToList();
 
-        // Failed logins (last 24h)
-        var failedOutput = await ExecuteCommandAsync("powershell",
-            "-Command \"Get-WinEvent -FilterHashtable @{LogName='Security';Id=4625;StartTime=(Get-Date).AddHours(-24)} -ErrorAction SilentlyContinue | Measure-Object | Select-Object -ExpandProperty Count\"");
-        int.TryParse(failedOutput.Trim(), out var failed);
-        security.FailedLoginAttempts = failed;
-
-        // Open ports
-        var portsOutput = await ExecuteCommandAsync("powershell",
-            "-Command \"Get-NetTCPConnection -State Listen | Select-Object -ExpandProperty LocalPort | Sort-Object -Unique\"");
-        security.OpenPorts = portsOutput.Split('\n')
-            .Where(l => !string.IsNullOrWhiteSpace(l))
-            .Select(l => l.Trim())
-            .Distinct()
-            .OrderBy(p => p)
-            .ToList();
-
-        // SSH keys
         var sshDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".ssh");
-        security.SshKeysPresent = Directory.Exists(sshDir) && Directory.GetFiles(sshDir, "*.pub").Length > 0;
+        s.SshKeysPresent = Directory.Exists(sshDir) && Directory.GetFiles(sshDir, "*.pub").Length > 0;
 
-        // Pending Windows updates
-        var updatesOutput = await ExecuteCommandAsync("powershell",
-            "-Command \"(New-Object -ComObject Microsoft.Update.Session).CreateUpdateSearcher().Search('IsInstalled=0').Updates.Count 2>$null\"");
-        int.TryParse(updatesOutput.Trim(), out var updates);
-        security.PendingSecurityUpdates = updates;
+        var updates = await PS("(New-Object -ComObject Microsoft.Update.Session).CreateUpdateSearcher().Search('IsInstalled=0').Updates.Count 2>$null", timeout: 30);
+        int.TryParse(updates, out var updateCount);
+        s.PendingSecurityUpdates = updateCount;
 
-        return security;
-    }
+        return s;
+    });
 
-    public async Task<VirtualizationInfo> GetVirtualizationInfoAsync()
+    //Virtualization
+
+    public Task<Result<VirtualizationInfo>> GetVirtualizationInfoAsync() => Result<VirtualizationInfo>.From(async () =>
     {
+        var model = (await PS("(Get-WmiObject Win32_ComputerSystem).Model")).ToLower();
         var info = new VirtualizationInfo();
 
-        var output = await ExecuteCommandAsync("powershell",
-            "-Command \"(Get-WmiObject Win32_ComputerSystem).Model\"");
-        var model = output.Trim().ToLower();
-
-        if (model.Contains("virtual") || model.Contains("vmware") || model.Contains("virtualbox") || model.Contains("hyper-v"))
+        if (model.Contains("virtual") || model.Contains("vmware") || model.Contains("virtualbox"))
         {
             info.IsVirtualMachine = true;
-            info.HypervisorType = model.Contains("vmware")     ? "VMware"
-                                 : model.Contains("virtualbox") ? "VirtualBox"
-                                 : model.Contains("hyper-v")    ? "Hyper-V"
-                                 : "Unknown";
+            info.HypervisorType = model.Contains("vmware") ? "VMware" : model.Contains("virtualbox") ? "VirtualBox" : "Hyper-V";
         }
 
-        // Docker / WSL
-        var wslOutput = await ExecuteCommandAsync("powershell",
-            "-Command \"[System.Environment]::GetEnvironmentVariable('WSL_DISTRO_NAME')\"");
-        if (!string.IsNullOrWhiteSpace(wslOutput.Trim()))
-        {
-            info.IsContainer = true;
-            info.HypervisorType = "WSL";
-        }
+        var wsl = await PS("[System.Environment]::GetEnvironmentVariable('WSL_DISTRO_NAME')");
+        if (!string.IsNullOrWhiteSpace(wsl)) { info.IsContainer = true; info.HypervisorType = "WSL"; }
 
         return info;
-    }
+    });
 
-    // Metrics
-
-    public double GetCpuLoadPercent()
-    {
-        try
-        {
-            using var counter = new System.Diagnostics.PerformanceCounter("Processor", "% Processor Time", "_Total");
-            counter.NextValue();
-            Thread.Sleep(100);
-            return Math.Round((double)counter.NextValue(), 2);
-        }
-        catch { return 0; }
-    }
-
-    public List<double> GetPerCoreCpuPercent()
-    {
-        var result = new List<double>();
-        try
-        {
-            var coreCount = Environment.ProcessorCount;
-            for (int i = 0; i < coreCount; i++)
-            {
-                using var counter = new System.Diagnostics.PerformanceCounter("Processor", "% Processor Time", i.ToString());
-                counter.NextValue();
-                Thread.Sleep(10);
-                result.Add(Math.Round((double)counter.NextValue(), 1));
-            }
-        }
-        catch { }
-        return result;
-    }
-
-    public double GetCpuTemperature()
-    {
-        try
-        {
-            var output = ExecuteCommandAsync("powershell",
-                "-Command \"Get-WmiObject MSAcpi_ThermalZoneTemperature -Namespace root/wmi | Select-Object -ExpandProperty CurrentTemperature -First 1\"").Result;
-            if (double.TryParse(output.Trim(), out var raw))
-                return Math.Round((raw - 2732) / 10.0, 1);
-        }
-        catch { }
-        return 0;
-    }
-
-    public (double m1, double m5, double m15) GetLoadAverage()
-    {
-        var cpu = GetCpuLoadPercent();
-        return (cpu, cpu, cpu);
-    }
-
-    public double GetRamUsedGb()
-    {
-        try
-        {
-            using var available = new System.Diagnostics.PerformanceCounter("Memory", "Available MBytes");
-            var availableMb = (double)available.NextValue();
-            var totalBytes  = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
-            return Math.Round((double)totalBytes / 1024 / 1024 / 1024 - availableMb / 1024.0, 2);
-        }
-        catch { return 0; }
-    }
-
-    public double GetSwapUsedGb()
-    {
-        try
-        {
-            using var counter = new System.Diagnostics.PerformanceCounter("Paging File", "% Usage", "_Total");
-            counter.NextValue();
-            Thread.Sleep(100);
-            var pct = (double)counter.NextValue() / 100.0;
-            return Math.Round(pct * 4.0, 2);
-        }
-        catch { return 0; }
-    }
-
-    public double GetDiskFreeGb()
-    {
-        try { return Math.Round((double)new DriveInfo("C").AvailableFreeSpace / 1024 / 1024 / 1024, 2); }
-        catch { return 0; }
-    }
-
-    private long _lastDiskRead, _lastDiskWrite;
-
-    public (double ReadMbps, double WriteMbps) GetDiskIo()
-    {
-        try
-        {
-            using var readCounter  = new System.Diagnostics.PerformanceCounter("PhysicalDisk", "Disk Read Bytes/sec", "_Total");
-            using var writeCounter = new System.Diagnostics.PerformanceCounter("PhysicalDisk", "Disk Write Bytes/sec", "_Total");
-            readCounter.NextValue(); writeCounter.NextValue();
-            Thread.Sleep(100);
-            var readMbps  = Math.Round((double)readCounter.NextValue()  / 1024 / 1024, 2);
-            var writeMbps = Math.Round((double)writeCounter.NextValue() / 1024 / 1024, 2);
-            return (readMbps, writeMbps);
-        }
-        catch { return (0, 0); }
-    }
+    //Metrics
 
     private long _lastNetSent, _lastNetRecv;
 
-    public (long Sent, long Received) GetNetworkBytes()
+    public double GetCpuLoadPercent() => Result<double>.From(() =>
     {
-        try
+        using var c = new PerformanceCounter("Processor", "% Processor Time", "_Total");
+        c.NextValue(); Thread.Sleep(100);
+        return Math.Round((double)c.NextValue(), 2);
+    }).GetValueOrDefault(0);
+
+    public List<double> GetPerCoreCpuPercent() => Result<List<double>>.From(() =>
+        Enumerable.Range(0, Environment.ProcessorCount).Select(i =>
         {
-            var ifaces = NetworkInterface.GetAllNetworkInterfaces()
-                .Where(n => n.OperationalStatus == OperationalStatus.Up
-                         && n.NetworkInterfaceType != NetworkInterfaceType.Loopback);
-            var sent = ifaces.Sum(n => n.GetIPv4Statistics().BytesSent);
-            var recv = ifaces.Sum(n => n.GetIPv4Statistics().BytesReceived);
-            var ds = sent - _lastNetSent; var dr = recv - _lastNetRecv;
-            _lastNetSent = sent; _lastNetRecv = recv;
-            return (ds, dr);
-        }
-        catch { return (0, 0); }
-    }
+            using var c = new PerformanceCounter("Processor", "% Processor Time", i.ToString());
+            c.NextValue(); Thread.Sleep(10);
+            return Math.Round((double)c.NextValue(), 1);
+        }).ToList()).GetValueOrDefault([]);
 
-    public int GetActiveNetworkConnections()
+    public double GetCpuTemperature() => Result<double>.From(() =>
     {
-        try { return IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpConnections().Length; }
-        catch { return 0; }
-    }
+        var raw = RunAsync("powershell", "-Command \"Get-WmiObject MSAcpi_ThermalZoneTemperature -Namespace root/wmi | Select-Object -ExpandProperty CurrentTemperature -First 1\"").Result;
+        return double.TryParse(raw, out var t) ? Math.Round((t - 2732) / 10.0, 1) : 0;
+    }).GetValueOrDefault(0);
 
-    public (double UsagePercent, double TemperatureCelsius) GetGpuMetrics()
+    public (double, double, double) GetLoadAverage() { var c = GetCpuLoadPercent(); return (c, c, c); }
+
+    public double GetRamUsedGb() => Result<double>.From(() =>
     {
-        try
-        {
-            // Try nvidia-smi first
-            var nvOutput = ExecuteCommandAsync("nvidia-smi",
-                "--query-gpu=utilization.gpu,temperature.gpu --format=csv,noheader").Result;
-            if (!string.IsNullOrWhiteSpace(nvOutput))
-            {
-                var parts = nvOutput.Split(',');
-                var usage = double.TryParse(System.Text.RegularExpressions.Regex.Match(parts[0], @"\d+").Value, out var u) ? u : 0;
-                var temp  = parts.Length > 1 && double.TryParse(parts[1].Trim(), out var t) ? t : 0;
-                return (usage, temp);
-            }
+        using var c = new PerformanceCounter("Memory", "Available MBytes");
+        return Math.Round((double)GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / 1024 / 1024 / 1024 - (double)c.NextValue() / 1024, 2);
+    }).GetValueOrDefault(0);
 
-            // Fallback: WMI GPU load
-            var wmiOutput = ExecuteCommandAsync("powershell",
-                "-Command \"Get-WmiObject Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine 2>$null | Select-Object -ExpandProperty UtilizationPercentage -First 1\"").Result;
-            if (double.TryParse(wmiOutput.Trim(), out var load))
-                return (load, 0);
-        }
-        catch { }
-        return (0, 0);
-    }
-
-    public (double HealthPercent, int CycleCount) GetBatteryInfo()
+    public double GetSwapUsedGb() => Result<double>.From(() =>
     {
-        try
-        {
-            var output = ExecuteCommandAsync("powershell",
-                "-Command \"Get-WmiObject Win32_Battery | Select-Object EstimatedChargeRemaining,FullChargeCapacity,DesignCapacity | ConvertTo-Json\"").Result;
-            using var doc = JsonDocument.Parse(output);
-            var pct = doc.RootElement.GetProperty("EstimatedChargeRemaining").GetDouble();
+        using var c = new PerformanceCounter("Paging File", "% Usage", "_Total");
+        c.NextValue(); Thread.Sleep(100);
+        return Math.Round((double)c.NextValue() / 100.0 * 4.0, 2);
+    }).GetValueOrDefault(0);
 
-            // Cycle count not available via WMI — would need ACPI
-            return (pct, 0);
-        }
-        catch { return (0, 0); }
-    }
+    public double GetDiskFreeGb() =>
+        Result<double>.From(() => BytesToGb(new DriveInfo("C").AvailableFreeSpace)).GetValueOrDefault(0);
 
-    public List<ProcessInfo> GetTopCpuProcesses(int count = 5) => GetTopProcesses(count, byCpu: true);
-    public List<ProcessInfo> GetTopRamProcesses(int count = 5) => GetTopProcesses(count, byCpu: false);
+    public (double, double) GetDiskIo() => Result<(double, double)>.From(() =>
+    {
+        using var r = new PerformanceCounter("PhysicalDisk", "Disk Read Bytes/sec", "_Total");
+        using var w = new PerformanceCounter("PhysicalDisk", "Disk Write Bytes/sec", "_Total");
+        r.NextValue(); w.NextValue(); Thread.Sleep(100);
+        return (Math.Round((double)r.NextValue() / 1024 / 1024, 2),
+                Math.Round((double)w.NextValue() / 1024 / 1024, 2));
+    }).GetValueOrDefault((0, 0));
 
-    private static List<ProcessInfo> GetTopProcesses(int count, bool byCpu) =>
-        Process.GetProcesses()
-            .OrderByDescending(p => { try { return byCpu ? p.TotalProcessorTime.TotalMilliseconds : (double)p.WorkingSet64; } catch { return 0.0; } })
-            .Take(count)
-            .Select(p => { try { return new ProcessInfo { Name = p.ProcessName, RamMb = Math.Round((double)p.WorkingSet64 / 1024 / 1024, 1) }; } catch { return null!; } })
-            .Where(p => p is not null)
-            .ToList();
+    public (long, long) GetNetworkBytes() => Result<(long, long)>.From(() =>
+    {
+        var ifaces = NetworkInterface.GetAllNetworkInterfaces()
+            .Where(n => n.OperationalStatus == OperationalStatus.Up && n.NetworkInterfaceType != NetworkInterfaceType.Loopback);
+        var (sent, recv) = (ifaces.Sum(n => n.GetIPv4Statistics().BytesSent), ifaces.Sum(n => n.GetIPv4Statistics().BytesReceived));
+        var result = (sent - _lastNetSent, recv - _lastNetRecv);
+        (_lastNetSent, _lastNetRecv) = (sent, recv);
+        return result;
+    }).GetValueOrDefault((0, 0));
+
+    public int GetActiveNetworkConnections() =>
+        Result<int>.From(() => IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpConnections().Length).GetValueOrDefault(0);
+
+    public (double, double) GetGpuMetrics() => Result<(double, double)>.From(() =>
+    {
+        var nv = RunAsync("nvidia-smi", "--query-gpu=utilization.gpu,temperature.gpu --format=csv,noheader").Result;
+        if (string.IsNullOrWhiteSpace(nv)) return (0, 0);
+        var p = nv.Split(',');
+        return (double.TryParse(RegexMatch(p[0], @"\d+"), out var u) ? u : 0,
+                p.Length > 1 && double.TryParse(p[1].Trim(), out var t) ? t : 0);
+    }).GetValueOrDefault((0, 0));
+
+    public (double, int) GetBatteryInfo() => Result<(double, int)>.From(() =>
+    {
+        var json = RunAsync("powershell", "-Command \"Get-WmiObject Win32_Battery | Select-Object EstimatedChargeRemaining | ConvertTo-Json\"").Result;
+        var el = JsonArray(json).First();
+        return (el.TryGetProperty("EstimatedChargeRemaining", out var v) ? v.GetDouble() : 0, 0);
+    }).GetValueOrDefault((0, 0));
+
+    public List<ProcessInfo> GetTopCpuProcesses(int count = 5) =>
+        Result<List<ProcessInfo>>.From(() => Process.GetProcesses()
+            .OrderByDescending(p => p.TotalProcessorTime.TotalMilliseconds).Take(count)
+            .Select(p => new ProcessInfo { Name = p.ProcessName, RamMb = Math.Round((double)p.WorkingSet64 / 1024 / 1024, 1) })
+            .ToList()).GetValueOrDefault([]);
+
+    public List<ProcessInfo> GetTopRamProcesses(int count = 5) =>
+        Result<List<ProcessInfo>>.From(() => Process.GetProcesses()
+            .OrderByDescending(p => p.WorkingSet64).Take(count)
+            .Select(p => new ProcessInfo { Name = p.ProcessName, RamMb = Math.Round((double)p.WorkingSet64 / 1024 / 1024, 1) })
+            .ToList()).GetValueOrDefault([]);
 }

@@ -16,17 +16,16 @@ public sealed class MetricsCollectorService(
     IOptions<TemsConfiguration> config) : BackgroundService
 {
     private readonly TimeSpan _sampleInterval = TimeSpan.FromSeconds(config.Value.MetricsSampleIntervalSeconds);
-    private readonly TimeSpan _batchInterval  = TimeSpan.FromMinutes(config.Value.MetricsBatchIntervalMinutes);
+    private readonly TimeSpan _batchInterval = TimeSpan.FromMinutes(config.Value.MetricsBatchIntervalMinutes);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         logger.LogInformation("MetricsCollectorService started. Sample: {S}s · Batch: {B}min",
             _sampleInterval.TotalSeconds, _batchInterval.TotalMinutes);
 
-        var samplingTask = RunSamplingLoopAsync(stoppingToken);
-        var batchingTask = RunBatchingLoopAsync(stoppingToken);
-
-        await Task.WhenAll(samplingTask, batchingTask);
+        await Task.WhenAll(
+            RunSamplingLoopAsync(stoppingToken),
+            RunBatchingLoopAsync(stoppingToken));
     }
 
     private async Task RunSamplingLoopAsync(CancellationToken ct)
@@ -34,19 +33,20 @@ public sealed class MetricsCollectorService(
         using var timer = new PeriodicTimer(_sampleInterval);
         while (!ct.IsCancellationRequested && await timer.WaitForNextTickAsync(ct))
         {
-            try
-            {
-                var sample = collector.CollectMetricsSample();
-                store.AddSample(sample);
+            var result = collector.CollectMetricsSample();
 
-                logger.LogDebug(
-                    "📊 CPU {Cpu}% | RAM {Ram} GB | Disk {Disk} GB free | NET ↑{Sent} ↓{Recv} B | BAT {Bat}%",
-                    sample.CpuLoadPercent, sample.RamUsedGb, sample.DiskFreeGb,
-                    sample.NetworkBytesSent, sample.NetworkBytesReceived,
-                    sample.BatteryHealthPercent);
+            if (result.IsFailure)
+            {
+                logger.LogWarning("Failed to collect metrics sample: {Error}", result.Error);
+                continue;
             }
-            catch (OperationCanceledException) { break; }
-            catch (Exception ex) { logger.LogError(ex, "Error during metrics sampling"); }
+
+            store.AddSample(result.Value!);
+
+            logger.LogDebug(
+                "📊 CPU {Cpu}% | RAM {Ram} GB | Disk {Disk} GB | NET ↑{Sent} ↓{Recv} B | GPU {Gpu}%",
+                result.Value!.CpuLoadPercent, result.Value.RamUsedGb, result.Value.DiskFreeGb,
+                result.Value.NetworkBytesSent, result.Value.NetworkBytesReceived, result.Value.GpuUsagePercent);
         }
     }
 
@@ -54,29 +54,22 @@ public sealed class MetricsCollectorService(
     {
         using var timer = new PeriodicTimer(_batchInterval);
         while (!ct.IsCancellationRequested && await timer.WaitForNextTickAsync(ct))
-        {
-            await SendBatchAsync(ct);
-        }
+            await SendBatchAsync();
     }
 
-    private async Task SendBatchAsync(CancellationToken ct)
+    private async Task SendBatchAsync()
     {
         var samples = store.GetAndClearSamples();
-        if (samples.Count == 0)
-        {
-            logger.LogDebug("No metrics samples to send.");
-            return;
-        }
+        if (samples.Count == 0) return;
 
         var batch = new MetricsBatch
         {
             BatchStart = samples.Min(s => s.Timestamp),
-            BatchEnd   = samples.Max(s => s.Timestamp),
-            Samples    = samples
+            BatchEnd = samples.Max(s => s.Timestamp),
+            Samples = samples
         };
 
-        logger.LogInformation("Sending batch of {Count} samples ({Start} → {End})",
-            batch.Samples.Count, batch.BatchStart, batch.BatchEnd);
+        logger.LogInformation("Sending batch of {Count} samples", batch.Samples.Count);
 
         var result = await apiClient.SendMetricsAsync(batch);
 
@@ -87,7 +80,7 @@ public sealed class MetricsCollectorService(
         else
         {
             foreach (var s in samples) store.AddSample(s);
-            logger.LogWarning("✗ Batch send failed: {Error}. Samples retained ({Count}).", result.Error, samples.Count);
+            logger.LogWarning("✗ Batch failed: {Error}. Samples retained ({Count}).", result.Error, samples.Count);
         }
     }
 }

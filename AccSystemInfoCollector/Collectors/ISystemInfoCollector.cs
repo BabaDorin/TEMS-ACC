@@ -4,6 +4,6 @@ namespace TEMS.ACC.Collectors;
 
 public interface ISystemInfoCollector
 {
-    Task<SystemProperties> CollectSystemPropertiesAsync();
-    MetricsSample CollectMetricsSample();
+    Task<Result<SystemProperties>> CollectSystemPropertiesAsync();
+    Result<MetricsSample> CollectMetricsSample();
 }

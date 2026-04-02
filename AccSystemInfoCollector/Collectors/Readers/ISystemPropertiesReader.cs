@@ -5,26 +5,34 @@ namespace TEMS.ACC.Collectors.Readers;
 public interface ISystemPropertiesReader
 {
     //Static properties
-    Task<string> GetSerialNumberAsync();
-    Task<string> GetUuidAsync();
-    string GetHostname();
-    List<string> GetMacAddresses();
+    Task<Result<string>> GetSerialNumberAsync();
+    Task<Result<string>> GetUuidAsync();
+    Result<string> GetHostname();
+    Result<List<string>> GetMacAddresses();
 
-    Task<(string Manufacturer, string Model, int Cores, int LogicalProcessors, string Architecture, double MaxGhz, double MinGhz)> GetCpuInfoAsync();
-    Task<double> GetRamTotalGbAsync();
-    Task<List<RamSlot>> GetRamSlotsAsync();
-    Task<(int Total, int Used)> GetRamSlotCountAsync();
-    Task<List<StorageDrive>> GetStorageDrivesAsync();
-    Task<List<GpuInfo>> GetGpusAsync();
-    Task<List<NetworkAdapterInfo>> GetNetworkAdaptersAsync();
-    Task<(string Name, string Version, DateTime LastBoot, string LastUser)> GetOsInfoAsync();
-    Task<(string Shell, string DisplayServer, string DesktopEnv, string Locale, int PackageCount)> GetSoftwareInfoAsync();
-    Task<(string Manufacturer, string Model, string BiosVersion, string Motherboard)> GetSystemInfoAsync();
-    Task<List<DisplayInfo>> GetDisplaysAsync();
-    Task<SecurityInfo> GetSecurityInfoAsync();
-    Task<VirtualizationInfo> GetVirtualizationInfoAsync();
+    Task<Result<(string Manufacturer, string Model, int Cores, int LogicalProcessors,
+        string Architecture, double MaxGhz, double MinGhz)>> GetCpuInfoAsync();
 
-    //Metrics
+    Task<Result<double>> GetRamTotalGbAsync();
+    Task<Result<List<RamSlot>>> GetRamSlotsAsync();
+    Task<Result<(int Total, int Used)>> GetRamSlotCountAsync();
+    Task<Result<List<StorageDrive>>> GetStorageDrivesAsync();
+    Task<Result<List<GpuInfo>>> GetGpusAsync();
+    Task<Result<List<NetworkAdapterInfo>>> GetNetworkAdaptersAsync();
+
+    Task<Result<(string Name, string Version, DateTime LastBoot, string LastUser)>> GetOsInfoAsync();
+
+    Task<Result<(string Shell, string DisplayServer, string DesktopEnv,
+        string Locale, int PackageCount)>> GetSoftwareInfoAsync();
+
+    Task<Result<(string Manufacturer, string Model, string BiosVersion,
+        string Motherboard)>> GetSystemInfoAsync();
+
+    Task<Result<List<DisplayInfo>>> GetDisplaysAsync();
+    Task<Result<SecurityInfo>> GetSecurityInfoAsync();
+    Task<Result<VirtualizationInfo>> GetVirtualizationInfoAsync();
+
+    // Metrics (plain — wrapped at collector level)
     double GetCpuLoadPercent();
     List<double> GetPerCoreCpuPercent();
     double GetCpuTemperature();

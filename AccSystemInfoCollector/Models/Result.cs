@@ -14,8 +14,7 @@ public class Result<T>
         Error = error;
     }
 
-    public static Result<T> Success(T value) =>
-        new(true, value, null);
+    public static Result<T> Success(T value) => new(true, value, null);
 
     public static Result<T> Failure(string error, Exception? exception = null)
     {
@@ -27,19 +26,34 @@ public class Result<T>
     {
         try
         {
-            var value = await task();
-            return Success(value);
+            return Success(await task());
         }
         catch (Exception ex)
         {
             return Failure("An error occurred", ex);
         }
     }
+
+    public static Result<T> From(Func<T> func)
+    {
+        try
+        {
+            return Success(func());
+        }
+        catch (Exception ex)
+        {
+            return Failure("An error occurred", ex);
+        }
+    }
+
+    public T GetValueOrDefault(T defaultValue = default!) =>
+        IsSuccess ? Value! : defaultValue;
 }
 
 public static class Result
 {
     public static Result<T> Success<T>(T value) => Result<T>.Success(value);
+
     public static Result<T> Failure<T>(string error, Exception? exception = null) =>
         Result<T>.Failure(error, exception);
 }

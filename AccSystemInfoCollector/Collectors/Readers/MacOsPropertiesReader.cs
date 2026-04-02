@@ -1,512 +1,290 @@
 using System.Diagnostics;
 using System.Net.NetworkInformation;
 using TEMS.ACC.Models;
+using TEMS.ACC.Helpers;
 
 namespace TEMS.ACC.Collectors.Readers;
 
 public sealed class MacOsPropertiesReader : BasePropertiesReader, ISystemPropertiesReader
 {
-    // Static properties
+    private Task<string> Profiler(string dataType) => RunAsync("system_profiler", dataType);
 
-    public async Task<string> GetSerialNumberAsync()
-    {
-        var output = await ExecuteCommandAsync("system_profiler", "SPHardwareDataType");
-        return output.Split('\n').FirstOrDefault(l => l.Contains("Serial Number"))?.Split(':').Last().Trim() ?? "Unknown";
-    }
+    //Identity
+    public Task<Result<string>> GetSerialNumberAsync() => Result<string>.From(async () =>
+        (await Profiler("SPHardwareDataType")).Lines().Find("Serial Number")?.After(':').Trim() ?? "Unknown");
 
-    public async Task<string> GetUuidAsync()
-    {
-        var output = await ExecuteCommandAsync("system_profiler", "SPHardwareDataType");
-        return output.Split('\n').FirstOrDefault(l => l.Contains("Hardware UUID") || l.Contains("Provisioning UDID"))?.Split(':').Last().Trim() ?? "Unknown";
-    }
+    public Task<Result<string>> GetUuidAsync() => Result<string>.From(async () =>
+        (await Profiler("SPHardwareDataType")).Lines().Find("Hardware UUID", "Provisioning UDID")?.After(':').Trim() ?? "Unknown");
 
-    public string GetHostname() => GetHostnameBase();
-    public List<string> GetMacAddresses() => GetMacAddressesBase();
+    public Result<string> GetHostname() => Result<string>.From(GetHostnameBase);
+    public Result<List<string>> GetMacAddresses() => Result<List<string>>.From(GetMacAddressesBase);
 
-    public async Task<(string Manufacturer, string Model, int Cores, int LogicalProcessors, string Architecture, double MaxGhz, double MinGhz)> GetCpuInfoAsync()
-    {
-        var hw = await ExecuteCommandAsync("system_profiler", "SPHardwareDataType");
-        var lines = hw.Split('\n');
-
-        var chip = lines.FirstOrDefault(l => l.Contains("Chip:") || l.Contains("Processor Name:"))?.Split(':').Last().Trim() ?? "Unknown";
-        var coreStr = lines.FirstOrDefault(l => l.Contains("Total Number of Cores:"))?.Split(':').Last().Trim() ?? "0";
-        int.TryParse(coreStr.Split(' ')[0], out var cores);
-
-        var speedStr = lines.FirstOrDefault(l => l.Contains("Processor Speed:"))?.Split(':').Last().Trim() ?? "";
-        double maxGhz = 0;
-        if (speedStr.Contains("GHz") && double.TryParse(speedStr.Replace("GHz", "").Trim(),
-            System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var ghz))
-            maxGhz = ghz;
-
-        var arch = (await ExecuteCommandAsync("uname", "-m")).Trim();
-        return ("Apple", chip, cores, cores, arch, maxGhz, 0);
-    }
-
-    public async Task<double> GetRamTotalGbAsync()
-    {
-        var hw = await ExecuteCommandAsync("system_profiler", "SPHardwareDataType");
-        var memLine = hw.Split('\n').FirstOrDefault(l => l.Contains("Memory:"))?.Split(':').Last().Trim() ?? "0 GB";
-        var parts = memLine.Split(' ');
-        if (double.TryParse(parts[0], out var val))
+    // CPU
+    public Task<Result<(string, string, int, int, string, double, double)>> GetCpuInfoAsync() =>
+        Result<(string, string, int, int, string, double, double)>.From(async () =>
         {
-            if (parts.Length > 1 && parts[1].Equals("GB", StringComparison.OrdinalIgnoreCase)) return val;
-            if (parts.Length > 1 && parts[1].Equals("MB", StringComparison.OrdinalIgnoreCase)) return Math.Round(val / 1024.0, 2);
-        }
-        return 0;
-    }
+            var lines = (await Profiler("SPHardwareDataType")).Lines();
+            var chip = lines.Find("Chip:", "Processor Name:")?.After(':').Trim() ?? "Unknown";
+            int.TryParse(lines.Find("Total Number of Cores:")?.After(':').Trim().Split(' ')[0], out var cores);
+            var speedStr = lines.Find("Processor Speed:")?.After(':').Trim() ?? "";
+            double maxGhz = speedStr.Contains("GHz") && double.TryParse(speedStr.Replace("GHz", "").Trim(),
+                System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var g) ? g : 0;
+            var arch = await RunAsync("uname", "-m");
+            return ("Apple", chip, cores, cores, arch, maxGhz, 0);
+        });
 
-    public async Task<List<RamSlot>> GetRamSlotsAsync()
+    //RAM
+    public Task<Result<double>> GetRamTotalGbAsync() => Result<double>.From(async () =>
     {
-        var slots = new List<RamSlot>();
-        var output = await ExecuteCommandAsync("system_profiler", "SPMemoryDataType");
+        var mem = (await Profiler("SPHardwareDataType")).Lines().Find("Memory:")?.After(':').Trim() ?? "0 GB";
+        var p = mem.Split(' ');
+        if (!double.TryParse(p[0], out var val)) return 0;
+        return p.Length > 1 && p[1].Equals("GB", StringComparison.OrdinalIgnoreCase) ? val
+             : p.Length > 1 && p[1].Equals("MB", StringComparison.OrdinalIgnoreCase) ? Math.Round(val / 1024.0, 2) : 0;
+    });
 
-        foreach (var block in output.Split("\n\n"))
-        {
-            if (!block.Contains("Size:")) continue;
-            var lines = block.Split('\n');
-            string Get(string key) => lines.FirstOrDefault(l => l.TrimStart().StartsWith(key))?.Split(':').Last().Trim() ?? "Unknown";
-
-            var sizeStr = Get("Size:");
-            if (sizeStr is "Empty" or "Unknown") continue;
-
-            double sizeGb = 0;
-            if (sizeStr.EndsWith("GB") && double.TryParse(sizeStr.Replace("GB", "").Trim(), out var g)) sizeGb = g;
-            else if (sizeStr.EndsWith("MB") && double.TryParse(sizeStr.Replace("MB", "").Trim(), out var m)) sizeGb = Math.Round(m / 1024.0, 2);
-
-            int.TryParse(System.Text.RegularExpressions.Regex.Match(Get("Speed:"), @"\d+").Value, out var speed);
-
-            slots.Add(new RamSlot
+    public Task<Result<List<RamSlot>>> GetRamSlotsAsync() => Result<List<RamSlot>>.From(async () =>
+        (await Profiler("SPMemoryDataType")).Blocks().Where(b => b.Contains("Size:"))
+            .Select(b =>
             {
-                Locator      = Get("BANK"),
-                SizeGb       = sizeGb,
-                Type         = Get("Type:"),
-                SpeedMhz     = speed,
-                Manufacturer = Get("Manufacturer:"),
-                PartNumber   = Get("Part Number:")
-            });
-        }
+                var lines = b.Split('\n');
+                string Get(string k) => lines.FirstOrDefault(l => l.TrimStart().StartsWith(k))?.After(':').Trim() ?? "Unknown";
+                var sizeStr = Get("Size:");
+                if (sizeStr is "Empty" or "Unknown") return null;
+                double gb = sizeStr.EndsWith("GB") && double.TryParse(sizeStr.Replace("GB", "").Trim(), out var g) ? g
+                          : sizeStr.EndsWith("MB") && double.TryParse(sizeStr.Replace("MB", "").Trim(), out var m) ? Math.Round(m / 1024.0, 2) : 0;
+                int.TryParse(RegexMatch(Get("Speed:"), @"\d+"), out var speed);
+                return new RamSlot { Locator = Get("BANK"), SizeGb = gb, Type = Get("Type:"), SpeedMhz = speed, Manufacturer = Get("Manufacturer:"), PartNumber = Get("Part Number:") };
+            })
+            .Where(s => s is not null).Cast<RamSlot>().ToList());
 
-        return slots;
-    }
-
-    public async Task<(int Total, int Used)> GetRamSlotCountAsync()
+    public Task<Result<(int, int)>> GetRamSlotCountAsync() => Result<(int, int)>.From(async () =>
     {
-        var output = await ExecuteCommandAsync("system_profiler", "SPMemoryDataType");
+        var output = await Profiler("SPMemoryDataType");
         var total = System.Text.RegularExpressions.Regex.Matches(output, "BANK").Count;
-        var used  = output.Split("\n\n").Count(b => b.Contains("Size:") && !b.Contains("Empty"));
+        var used = output.Blocks().Count(b => b.Contains("Size:") && !b.Contains("Empty"));
         return (total > 0 ? total : used, used);
-    }
+    });
 
-    public async Task<List<StorageDrive>> GetStorageDrivesAsync()
-    {
-        var drives = new List<StorageDrive>();
-        var output = await ExecuteCommandAsync("system_profiler", "SPStorageDataType");
-
-        foreach (var block in output.Split("\n\n"))
-        {
-            if (!block.Contains("Capacity:")) continue;
-            var lines = block.Split('\n');
-            string Get(string key) => lines.FirstOrDefault(l => l.TrimStart().StartsWith(key))?.Split(':').Last().Trim() ?? "Unknown";
-
-            var medium = Get("Medium Type:");
-            var type = medium.Contains("SSD") || medium.Contains("Flash") ? "SSD"
-                     : medium.Contains("HDD") || medium.Contains("Rotational") ? "HDD"
-                     : "SSD"; // Apple Silicon default
-
-            drives.Add(new StorageDrive
+    //Storage
+    public Task<Result<List<StorageDrive>>> GetStorageDrivesAsync() => Result<List<StorageDrive>>.From(async () =>
+        (await Profiler("SPStorageDataType")).Blocks().Where(b => b.Contains("Capacity:"))
+            .Select(b =>
             {
-                Model  = Get("Volume Name:").NullIfEmpty() ?? Get("Physical Drive:"),
-                SizeGb = ParseSizeToGb(Get("Capacity:")),
-                Type   = type
-            });
-        }
+                var lines = b.Split('\n');
+                string Get(string k) => lines.FirstOrDefault(l => l.TrimStart().StartsWith(k))?.After(':').Trim() ?? "Unknown";
+                var medium = Get("Medium Type:");
+                return new StorageDrive
+                {
+                    Model = Get("Volume Name:").NullIfEmpty() ?? Get("Physical Drive:"),
+                    SizeGb = ParseSizeToGb(Get("Capacity:")),
+                    Type = medium.Contains("SSD") || medium.Contains("Flash") ? "SSD" : medium.Contains("HDD") ? "HDD" : "SSD"
+                };
+            }).ToList());
 
-        return drives;
-    }
-
-    public async Task<List<GpuInfo>> GetGpusAsync()
-    {
-        var gpus = new List<GpuInfo>();
-        var output = await ExecuteCommandAsync("system_profiler", "SPDisplaysDataType");
-
-        foreach (var block in output.Split("\n\n"))
-        {
-            if (!block.Contains("Chipset Model:")) continue;
-            var lines = block.Split('\n');
-            var model   = lines.FirstOrDefault(l => l.Contains("Chipset Model:"))?.Split(':').Last().Trim() ?? "Unknown";
-            var vramStr = lines.FirstOrDefault(l => l.Contains("VRAM"))?.Split(':').Last().Trim() ?? "0 MB";
-            gpus.Add(new GpuInfo { Model = model, VramMb = ParseVramToMb(vramStr) });
-        }
-
-        return gpus;
-    }
-
-    public async Task<List<NetworkAdapterInfo>> GetNetworkAdaptersAsync()
-    {
-        var adapters = new List<NetworkAdapterInfo>();
-
-        foreach (var iface in NetworkInterface.GetAllNetworkInterfaces())
-        {
-            var mac = string.Join(":", iface.GetPhysicalAddress().GetAddressBytes().Select(b => b.ToString("X2")));
-            var ips = iface.GetIPProperties().UnicastAddresses.Select(a => a.Address.ToString()).ToList();
-
-            var type = iface.NetworkInterfaceType switch
+    //GPU
+    public Task<Result<List<GpuInfo>>> GetGpusAsync() => Result<List<GpuInfo>>.From(async () =>
+        (await Profiler("SPDisplaysDataType")).Blocks().Where(b => b.Contains("Chipset Model:"))
+            .Select(b =>
             {
-                NetworkInterfaceType.Ethernet     => "Ethernet",
-                NetworkInterfaceType.Wireless80211 => "WiFi",
-                NetworkInterfaceType.Loopback     => "Loopback",
-                _ => iface.NetworkInterfaceType.ToString()
-            };
+                var lines = b.Split('\n');
+                return new GpuInfo
+                {
+                    Model = lines.FirstOrDefault(l => l.Contains("Chipset Model:"))?.After(':').Trim() ?? "Unknown",
+                    VramMb = ParseVramToMb(lines.FirstOrDefault(l => l.Contains("VRAM"))?.After(':').Trim() ?? "0 MB")
+                };
+            }).ToList());
 
-            adapters.Add(new NetworkAdapterInfo
+    //Network
+    public Task<Result<List<NetworkAdapterInfo>>> GetNetworkAdaptersAsync() =>
+        Result<List<NetworkAdapterInfo>>.From(() => Task.FromResult(
+            NetworkInterface.GetAllNetworkInterfaces().Select(iface => new NetworkAdapterInfo
             {
-                Name        = iface.Name,
-                MacAddress  = mac,
-                IpAddresses = ips,
-                Type        = type,
-                SpeedMbps   = iface.Speed > 0 ? iface.Speed / 1_000_000 : 0,
-                Driver      = "Unknown",
-                IsUp        = iface.OperationalStatus == OperationalStatus.Up
-            });
-        }
+                Name = iface.Name,
+                MacAddress = string.Join(":", iface.GetPhysicalAddress().GetAddressBytes().Select(b => b.ToString("X2"))),
+                IpAddresses = iface.GetIPProperties().UnicastAddresses.Select(a => a.Address.ToString()).ToList(),
+                Type = iface.NetworkInterfaceType switch
+                {
+                    NetworkInterfaceType.Ethernet => "Ethernet",
+                    NetworkInterfaceType.Wireless80211 => "WiFi",
+                    NetworkInterfaceType.Loopback => "Loopback",
+                    _ => iface.NetworkInterfaceType.ToString()
+                },
+                SpeedMbps = iface.Speed > 0 ? iface.Speed / 1_000_000 : 0,
+                Driver = "Unknown",
+                IsUp = iface.OperationalStatus == OperationalStatus.Up
+            }).ToList()));
 
-        return adapters;
-    }
-
-    public async Task<(string Name, string Version, DateTime LastBoot, string LastUser)> GetOsInfoAsync()
+    //OS
+    public Task<Result<(string, string, DateTime, string)>> GetOsInfoAsync() => Result<(string, string, DateTime, string)>.From(async () =>
     {
-        var sw = await ExecuteCommandAsync("sw_vers", "");
-        var name    = sw.Split('\n').FirstOrDefault(l => l.StartsWith("ProductName:"))?.Split(':').Last().Trim() ?? "macOS";
-        var version = sw.Split('\n').FirstOrDefault(l => l.StartsWith("ProductVersion:"))?.Split(':').Last().Trim() ?? "Unknown";
-
-        var bootOutput = await ExecuteCommandAsync("sysctl", "-n kern.boottime");
-        var epochMatch = System.Text.RegularExpressions.Regex.Match(bootOutput, @"sec = (\d+)");
-        var lastBoot = epochMatch.Success && long.TryParse(epochMatch.Groups[1].Value, out var epoch)
+        var sw = (await RunAsync("sw_vers", "")).Lines();
+        var name = sw.Find("ProductName:")?.After(':').Trim() ?? "macOS";
+        var version = sw.Find("ProductVersion:")?.After(':').Trim() ?? "Unknown";
+        var boot = await RunAsync("sysctl", "-n kern.boottime");
+        var lastBoot = long.TryParse(RegexMatch(boot, @"sec = (\d+)"), out var epoch)
             ? DateTimeOffset.FromUnixTimeSeconds(epoch).UtcDateTime : DateTime.UtcNow;
-
-        var lastUser = (await ExecuteCommandAsync("last", "-1")).Split('\n').FirstOrDefault()?.Split(' ').FirstOrDefault() ?? "Unknown";
-
+        var lastUser = (await RunAsync("last", "-1")).Split('\n').FirstOrDefault()?.Split(' ').FirstOrDefault() ?? "Unknown";
         return ($"{name} {version}", version, lastBoot, lastUser);
-    }
+    });
 
-    public async Task<(string Shell, string DisplayServer, string DesktopEnv, string Locale, int PackageCount)> GetSoftwareInfoAsync()
+    public Task<Result<(string, string, string, string, int)>> GetSoftwareInfoAsync() => Result<(string, string, string, string, int)>.From(async () =>
     {
         var shell = Environment.GetEnvironmentVariable("SHELL")?.Split('/').Last() ?? "Unknown";
-        var locale = (await ExecuteCommandAsync("defaults", "read NSGlobalDomain AppleLocale")).Trim().NullIfEmpty() ?? "Unknown";
-
-        // Package count: try brew, then macports
-        int packages = 0;
-        var brew = await ExecuteCommandAsync("brew", "list --formula");
-        if (!string.IsNullOrWhiteSpace(brew))
-            packages = brew.Split('\n').Count(l => !string.IsNullOrWhiteSpace(l));
-        else
-        {
-            var port = await ExecuteCommandAsync("port", "installed");
-            packages = port.Split('\n').Count(l => !string.IsNullOrWhiteSpace(l));
-        }
-
+        var locale = (await RunAsync("defaults", "read NSGlobalDomain AppleLocale")).NullIfEmpty() ?? "Unknown";
+        var brew = await RunAsync("brew", "list --formula");
+        var packages = string.IsNullOrWhiteSpace(brew) ? 0 : brew.Split('\n').Count(l => !string.IsNullOrWhiteSpace(l));
         return (shell, "Quartz Compositor", "macOS Aqua", locale, packages);
-    }
+    });
 
-    public async Task<(string Manufacturer, string Model, string BiosVersion, string Motherboard)> GetSystemInfoAsync()
+    //System
+    public Task<Result<(string, string, string, string)>> GetSystemInfoAsync() => Result<(string, string, string, string)>.From(async () =>
     {
-        var hw = await ExecuteCommandAsync("system_profiler", "SPHardwareDataType");
-        var lines = hw.Split('\n');
+        var lines = (await Profiler("SPHardwareDataType")).Lines();
+        return ("Apple",
+                lines.Find("Model Name:")?.After(':').Trim() ?? "Unknown",
+                lines.Find("Boot ROM Version:")?.After(':').Trim() ?? "Unknown",
+                lines.Find("Model Identifier:")?.After(':').Trim() ?? "Unknown");
+    });
 
-        var model   = lines.FirstOrDefault(l => l.Contains("Model Name:"))?.Split(':').Last().Trim() ?? "Unknown";
-        var modelId = lines.FirstOrDefault(l => l.Contains("Model Identifier:"))?.Split(':').Last().Trim() ?? "Unknown";
-        var boot    = lines.FirstOrDefault(l => l.Contains("Boot ROM Version:"))?.Split(':').Last().Trim() ?? "Unknown";
-
-        return ("Apple", model, boot, modelId);
-    }
-
-    public async Task<List<DisplayInfo>> GetDisplaysAsync()
+    //Displays
+    public Task<Result<List<DisplayInfo>>> GetDisplaysAsync() => Result<List<DisplayInfo>>.From(async () =>
     {
-        var displays = new List<DisplayInfo>();
-        var output = await ExecuteCommandAsync("system_profiler", "SPDisplaysDataType");
-
         var first = true;
-        foreach (var block in output.Split("\n\n"))
-        {
-            var resLine = block.Split('\n').FirstOrDefault(l => l.Contains("Resolution:"));
-            if (resLine is null) continue;
-            var res = resLine.Split(':').Last().Trim().Split('@')[0].Trim().Replace(" x ", "x");
-            displays.Add(new DisplayInfo { Resolution = res, IsPrimary = first });
-            first = false;
-        }
+        return (await Profiler("SPDisplaysDataType")).Blocks()
+            .Select(b =>
+            {
+                var resLine = b.Split('\n').FirstOrDefault(l => l.Contains("Resolution:"));
+                if (resLine is null) return null;
+                var d = new DisplayInfo { Resolution = resLine.After(':').Trim().Split('@')[0].Trim().Replace(" x ", "x"), IsPrimary = first };
+                first = false;
+                return d;
+            })
+            .Where(d => d is not null).Cast<DisplayInfo>().ToList();
+    });
 
-        return displays;
-    }
-
-    public async Task<SecurityInfo> GetSecurityInfoAsync()
+    //Security
+    public Task<Result<SecurityInfo>> GetSecurityInfoAsync() => Result<SecurityInfo>.From(async () =>
     {
-        var security = new SecurityInfo();
-
-        // Secure Boot (Apple Silicon / T2)
-        var sbOutput = await ExecuteCommandAsync("system_profiler", "SPiBridgeDataType");
-        security.SecureBootEnabled = sbOutput.Contains("Full Security") || sbOutput.Contains("Reduced Security");
-
-        // TPM — Apple uses T2/Secure Enclave, not classic TPM
-        security.TpmVersion = sbOutput.Contains("Apple T2") ? "T2 (Apple)" : "Secure Enclave";
-
-        // FileVault (disk encryption)
-        var fvOutput = await ExecuteCommandAsync("fdesetup", "status");
-        security.DiskEncryptionEnabled = fvOutput.Contains("On");
-
-        // Firewall
-        var fwOutput = await ExecuteCommandAsync("defaults", "read /Library/Preferences/com.apple.alf globalstate");
-        security.FirewallActive = fwOutput.Trim() is "1" or "2";
-
-        security.AppArmorStatus = "N/A (macOS)";
-
-        // Failed logins
-        var failedOutput = await ExecuteCommandAsync("log", "show --last 24h --predicate 'eventMessage contains \"Failed\"' --style syslog");
-        security.FailedLoginAttempts = failedOutput.Split('\n').Count(l => l.Contains("Failed password") || l.Contains("Invalid user"));
-
-        // Open ports
-        var lsofOutput = await ExecuteCommandAsync("lsof", "-nP -iTCP -sTCP:LISTEN");
-        security.OpenPorts = lsofOutput.Split('\n')
-            .Skip(1)
-            .Where(l => !string.IsNullOrWhiteSpace(l))
-            .Select(l => System.Text.RegularExpressions.Regex.Match(l, @":(\d+)\s*\(").Groups[1].Value)
-            .Where(p => !string.IsNullOrWhiteSpace(p))
-            .Distinct()
-            .OrderBy(p => p)
-            .ToList();
-
-        // SSH keys
+        var s = new SecurityInfo();
+        var sb = await Profiler("SPiBridgeDataType");
+        s.SecureBootEnabled = sb.Contains("Full Security") || sb.Contains("Reduced Security");
+        s.TpmVersion = sb.Contains("Apple T2") ? "T2 (Apple)" : "Secure Enclave";
+        s.DiskEncryptionEnabled = (await RunAsync("fdesetup", "status")).Contains("On");
+        s.FirewallActive = (await RunAsync("defaults", "read /Library/Preferences/com.apple.alf globalstate")).Trim() is "1" or "2";
+        s.AppArmorStatus = "N/A (macOS)";
+        s.OpenPorts = (await RunAsync("lsof", "-nP -iTCP -sTCP:LISTEN")).Split('\n').Skip(1)
+            .Select(l => RegexMatch(l, @":(\d+)\s*\(")).Where(p => !string.IsNullOrWhiteSpace(p))
+            .Distinct().OrderBy(x => x).ToList();
         var sshDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".ssh");
-        security.SshKeysPresent = Directory.Exists(sshDir) && Directory.GetFiles(sshDir, "*.pub").Length > 0;
+        s.SshKeysPresent = Directory.Exists(sshDir) && Directory.GetFiles(sshDir, "*.pub").Length > 0;
+        s.PendingSecurityUpdates = (await RunAsync("softwareupdate", "-l")).Split('\n').Count(l => l.TrimStart().StartsWith("*"));
+        return s;
+    });
 
-        // Pending updates
-        var updatesOutput = await ExecuteCommandAsync("softwareupdate", "-l");
-        security.PendingSecurityUpdates = updatesOutput.Split('\n').Count(l => l.TrimStart().StartsWith("*"));
-
-        return security;
-    }
-
-    public async Task<VirtualizationInfo> GetVirtualizationInfoAsync()
+    //Virtualization
+    public Task<Result<VirtualizationInfo>> GetVirtualizationInfoAsync() => Result<VirtualizationInfo>.From(async () =>
     {
         var info = new VirtualizationInfo();
-
-        var sysctl = await ExecuteCommandAsync("sysctl", "-n kern.hv_vmm_present");
-        if (sysctl.Trim() == "1")
-        {
+        if ((await RunAsync("sysctl", "-n kern.hv_vmm_present")).Trim() == "1")
             info.IsVirtualMachine = true;
-            // Try to identify hypervisor
-            var model = (await ExecuteCommandAsync("system_profiler", "SPHardwareDataType"))
-                .Split('\n').FirstOrDefault(l => l.Contains("Model Identifier:"))?.Split(':').Last().Trim() ?? "";
-            info.HypervisorType = model.Contains("VMware") ? "VMware"
-                : model.Contains("VirtualBox") ? "VirtualBox"
-                : "Unknown Hypervisor";
-        }
-
-        // Docker
-        if (File.Exists("/.dockerenv"))
-        {
-            info.IsContainer = true;
-            info.HypervisorType = "Docker";
-        }
-
+        if (File.Exists("/.dockerenv")) { info.IsContainer = true; info.HypervisorType = "Docker"; }
         return info;
-    }
-    
-    // Metrics
-    
-    public double GetCpuLoadPercent()
+    });
+
+    //Metrics
+    private long _lastDiskRead, _lastDiskWrite, _lastNetSent, _lastNetRecv;
+
+    public double GetCpuLoadPercent() => Result<double>.From(() =>
     {
-        try
+        var output = RunAsync("bash", "-c \"top -l 1 -s 0 | grep 'CPU usage'\"").Result;
+        var m = System.Text.RegularExpressions.Regex.Match(output, @"([\d.]+)% user.*?([\d.]+)% sys");
+        if (!m.Success) return 0;
+        double.TryParse(m.Groups[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var user);
+        double.TryParse(m.Groups[2].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var sys);
+        return Math.Round(user + sys, 2);
+    }).GetValueOrDefault(0);
+
+    public List<double> GetPerCoreCpuPercent() => [];
+    public double GetCpuTemperature() => 0;
+
+    public (double, double, double) GetLoadAverage() => Result<(double, double, double)>.From(() =>
+    {
+        var m = System.Text.RegularExpressions.Regex.Match(
+            RunAsync("sysctl", "-n vm.loadavg").Result, @"{ ([\d.]+) ([\d.]+) ([\d.]+) }");
+        if (!m.Success) return (0, 0, 0);
+        double P(int i) => double.TryParse(m.Groups[i].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var v) ? v : 0;
+        return (P(1), P(2), P(3));
+    }).GetValueOrDefault((0, 0, 0));
+
+    public double GetRamUsedGb() => Result<double>.From(() =>
+    {
+        var lines = RunAsync("vm_stat", "").Result.Split('\n');
+        long Get(string key)
         {
-            var output = ExecuteCommandAsync("bash", "-c \"top -l 1 -s 0 | grep 'CPU usage'\"").Result;
-            var match = System.Text.RegularExpressions.Regex.Match(output, @"([\d.]+)% user.*?([\d.]+)% sys");
-            if (match.Success)
-            {
-                double.TryParse(match.Groups[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var user);
-                double.TryParse(match.Groups[2].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var sys);
-                return Math.Round(user + sys, 2);
-            }
+            var l = lines.FirstOrDefault(x => x.Contains(key));
+            return l is not null && long.TryParse(RegexMatch(l, @"\d+"), out var v) ? v : 0;
         }
-        catch { }
-        return 0;
-    }
+        return Math.Round((Get("Pages active:") + Get("Pages wired down:") + Get("Pages occupied by compressor:")) * 4096L / 1024.0 / 1024.0 / 1024.0, 2);
+    }).GetValueOrDefault(0);
 
-    public List<double> GetPerCoreCpuPercent()
+    public double GetSwapUsedGb() => Result<double>.From(() =>
     {
-        // macOS doesn't expose per-core via simple file — use iostat
-        try
-        {
-            var output = ExecuteCommandAsync("bash", "-c \"iostat -c 2 | tail -1\"").Result;
-            var parts = output.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length >= 3 && double.TryParse(parts[0], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var user)
-                && double.TryParse(parts[2], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var sys))
-                return [Math.Round(user + sys, 1)]; // aggregate only on macOS
-        }
-        catch { }
-        return [];
-    }
+        var m = System.Text.RegularExpressions.Regex.Match(RunAsync("sysctl", "-n vm.swapusage").Result, @"used = ([\d.]+)M");
+        return m.Success && double.TryParse(m.Groups[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var mb)
+            ? Math.Round(mb / 1024.0, 2) : 0;
+    }).GetValueOrDefault(0);
 
-    public double GetCpuTemperature() => 0; // Requires IOKit / powermetrics (sudo)
+    public double GetDiskFreeGb() =>
+        Result<double>.From(() => BytesToGb(new DriveInfo("/").AvailableFreeSpace)).GetValueOrDefault(0);
 
-    public (double m1, double m5, double m15) GetLoadAverage()
+    public (double, double) GetDiskIo() => Result<(double, double)>.From(() =>
     {
-        try
-        {
-            var output = ExecuteCommandAsync("sysctl", "-n vm.loadavg").Result;
-            var match = System.Text.RegularExpressions.Regex.Match(output, @"{ ([\d.]+) ([\d.]+) ([\d.]+) }");
-            if (match.Success)
-            {
-                double.TryParse(match.Groups[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var m1);
-                double.TryParse(match.Groups[2].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var m5);
-                double.TryParse(match.Groups[3].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var m15);
-                return (m1, m5, m15);
-            }
-        }
-        catch { }
-        return (0, 0, 0);
-    }
+        var line = RunAsync("iostat", "-d -K disk0").Result.Split('\n')
+            .LastOrDefault(l => !string.IsNullOrWhiteSpace(l) && !l.TrimStart().StartsWith("KB"));
+        if (line is null) return (0, 0);
+        var p = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (p.Length < 3) return (0, 0);
+        long.TryParse(p[1], out var read); long.TryParse(p[2], out var write);
+        var result = (Math.Max(0, Math.Round((double)(read - _lastDiskRead) / 1024, 2)),
+                      Math.Max(0, Math.Round((double)(write - _lastDiskWrite) / 1024, 2)));
+        (_lastDiskRead, _lastDiskWrite) = (read, write);
+        return result;
+    }).GetValueOrDefault((0, 0));
 
-    public double GetRamUsedGb()
+    public (long, long) GetNetworkBytes() => Result<(long, long)>.From(() =>
     {
-        try
-        {
-            var output = ExecuteCommandAsync("vm_stat", "").Result;
-            var lines = output.Split('\n');
+        var ifaces = NetworkInterface.GetAllNetworkInterfaces()
+            .Where(n => n.OperationalStatus == OperationalStatus.Up && n.NetworkInterfaceType != NetworkInterfaceType.Loopback);
+        var (sent, recv) = (ifaces.Sum(n => n.GetIPv4Statistics().BytesSent), ifaces.Sum(n => n.GetIPv4Statistics().BytesReceived));
+        var result = (sent - _lastNetSent, recv - _lastNetRecv);
+        (_lastNetSent, _lastNetRecv) = (sent, recv);
+        return result;
+    }).GetValueOrDefault((0, 0));
 
-            long Get(string key)
-            {
-                var line = lines.FirstOrDefault(l => l.Contains(key));
-                return line is not null && long.TryParse(
-                    System.Text.RegularExpressions.Regex.Match(line, @"\d+").Value, out var v) ? v : 0;
-            }
+    public int GetActiveNetworkConnections() =>
+        Result<int>.From(() => System.Net.NetworkInformation.IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpConnections().Length)
+        .GetValueOrDefault(0);
 
-            var pageSize = 4096L;
-            var active   = Get("Pages active:");
-            var wired    = Get("Pages wired down:");
-            var compressed = Get("Pages occupied by compressor:");
+    public (double, double) GetGpuMetrics() => (0, 0);
 
-            return Math.Round((active + wired + compressed) * pageSize / 1024.0 / 1024.0 / 1024.0, 2);
-        }
-        catch { return 0; }
-    }
-
-    public double GetSwapUsedGb()
+    public (double, int) GetBatteryInfo() => Result<(double, int)>.From(() =>
     {
-        try
-        {
-            var vm = ExecuteCommandAsync("sysctl", "-n vm.swapusage").Result;
-            var match = System.Text.RegularExpressions.Regex.Match(vm, @"used = ([\d.]+)M");
-            if (match.Success && double.TryParse(match.Groups[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var mb))
-                return Math.Round(mb / 1024.0, 2);
-        }
-        catch { }
-        return 0;
-    }
+        var pct = RegexMatch(RunAsync("pmset", "-g batt").Result, @"(\d+)%;");
+        var cycle = RegexMatch(RunAsync("system_profiler", "SPPowerDataType").Result, @"Cycle Count: (\d+)");
+        double.TryParse(pct, out var p); int.TryParse(cycle, out var c);
+        return (p, c);
+    }).GetValueOrDefault((0, 0));
 
-    public double GetDiskFreeGb()
-    {
-        try { return Math.Round((double)new DriveInfo("/").AvailableFreeSpace / 1024 / 1024 / 1024, 2); }
-        catch { return 0; }
-    }
+    public List<ProcessInfo> GetTopCpuProcesses(int count = 5) =>
+        Result<List<ProcessInfo>>.From(() => Process.GetProcesses()
+            .OrderByDescending(p => p.TotalProcessorTime.TotalMilliseconds).Take(count)
+            .Select(p => new ProcessInfo { Name = p.ProcessName, RamMb = Math.Round((double)p.WorkingSet64 / 1024 / 1024, 1) })
+            .ToList()).GetValueOrDefault([]);
 
-    private long _lastDiskRead, _lastDiskWrite;
-
-    public (double ReadMbps, double WriteMbps) GetDiskIo()
-    {
-        try
-        {
-            var output = ExecuteCommandAsync("iostat", "-d -K disk0").Result;
-            var line = output.Split('\n').LastOrDefault(l => !string.IsNullOrWhiteSpace(l) && !l.TrimStart().StartsWith("KB"));
-            if (line is null) return (0, 0);
-            var p = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            if (p.Length >= 3)
-            {
-                long.TryParse(p[1], out var read);
-                long.TryParse(p[2], out var write);
-                var dr = Math.Round((double)(read  - _lastDiskRead)  / 1024, 2);
-                var dw = Math.Round((double)(write - _lastDiskWrite) / 1024, 2);
-                _lastDiskRead = read; _lastDiskWrite = write;
-                return (Math.Max(0, dr), Math.Max(0, dw));
-            }
-        }
-        catch { }
-        return (0, 0);
-    }
-
-    private long _lastNetSent, _lastNetRecv;
-
-    public (long Sent, long Received) GetNetworkBytes()
-    {
-        try
-        {
-            var ifaces = NetworkInterface.GetAllNetworkInterfaces()
-                .Where(n => n.OperationalStatus == OperationalStatus.Up
-                         && n.NetworkInterfaceType != NetworkInterfaceType.Loopback);
-            var sent = ifaces.Sum(n => n.GetIPv4Statistics().BytesSent);
-            var recv = ifaces.Sum(n => n.GetIPv4Statistics().BytesReceived);
-            var ds = sent - _lastNetSent; var dr = recv - _lastNetRecv;
-            _lastNetSent = sent; _lastNetRecv = recv;
-            return (ds, dr);
-        }
-        catch { return (0, 0); }
-    }
-
-    public int GetActiveNetworkConnections()
-    {
-        try { return System.Net.NetworkInformation.IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpConnections().Length; }
-        catch { return 0; }
-    }
-
-    public (double UsagePercent, double TemperatureCelsius) GetGpuMetrics()
-    {
-        // Requires sudo powermetrics — not available without elevated privileges
-        return (0, 0);
-    }
-
-    public (double HealthPercent, int CycleCount) GetBatteryInfo()
-    {
-        try
-        {
-            var output = ExecuteCommandAsync("pmset", "-g batt").Result;
-            var pctMatch = System.Text.RegularExpressions.Regex.Match(output, @"(\d+)%;");
-            if (!pctMatch.Success) return (0, 0);
-            double.TryParse(pctMatch.Groups[1].Value, out var pct);
-
-            var cycleOutput = ExecuteCommandAsync("system_profiler", "SPPowerDataType").Result;
-            var cycleMatch = System.Text.RegularExpressions.Regex.Match(cycleOutput, @"Cycle Count: (\d+)");
-            int.TryParse(cycleMatch.Groups[1].Value, out var cycles);
-
-            return (pct, cycles);
-        }
-        catch { return (0, 0); }
-    }
-
-    public List<ProcessInfo> GetTopCpuProcesses(int count = 5) => GetTopProcesses(count, byCpu: true);
-    public List<ProcessInfo> GetTopRamProcesses(int count = 5) => GetTopProcesses(count, byCpu: false);
-
-    private static List<ProcessInfo> GetTopProcesses(int count, bool byCpu) =>
-        Process.GetProcesses()
-            .OrderByDescending(p => { try { return byCpu ? p.TotalProcessorTime.TotalMilliseconds : (double)p.WorkingSet64; } catch { return 0.0; } })
-            .Take(count)
-            .Select(p => { try { return new ProcessInfo { Name = p.ProcessName, RamMb = Math.Round((double)p.WorkingSet64 / 1024 / 1024, 1) }; } catch { return null!; } })
-            .Where(p => p is not null)
-            .ToList();
-
-    //Helpers
-
-    private static double ParseSizeToGb(string s)
-    {
-        s = s.Trim().ToUpperInvariant().Split('(')[0].Trim();
-        if (s.Contains("TB") && double.TryParse(s.Replace("TB", "").Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var t)) return t * 1024;
-        if (s.Contains("GB") && double.TryParse(s.Replace("GB", "").Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var g)) return g;
-        if (s.Contains("MB") && double.TryParse(s.Replace("MB", "").Trim(), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var m)) return Math.Round(m / 1024.0, 2);
-        return 0;
-    }
-
-    private static long ParseVramToMb(string s)
-    {
-        s = s.Trim().ToUpperInvariant();
-        if (s.Contains("GB") && long.TryParse(s.Replace("GB", "").Trim(), out var g)) return g * 1024;
-        if (s.Contains("MB") && long.TryParse(s.Replace("MB", "").Trim(), out var m)) return m;
-        return 0;
-    }
+    public List<ProcessInfo> GetTopRamProcesses(int count = 5) =>
+        Result<List<ProcessInfo>>.From(() => Process.GetProcesses()
+            .OrderByDescending(p => p.WorkingSet64).Take(count)
+            .Select(p => new ProcessInfo { Name = p.ProcessName, RamMb = Math.Round((double)p.WorkingSet64 / 1024 / 1024, 1) })
+            .ToList()).GetValueOrDefault([]);
 }
